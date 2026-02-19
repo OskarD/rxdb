@@ -270,7 +270,7 @@ var RxQueryBase = exports.RxQueryBase = /*#__PURE__*/function () {
 
   // we only set some methods of query-builder here
   // because the others depend on these ones
-  ;
+;
   _proto.where = function where(_queryObj) {
     throw (0, _index.pluginMissing)('query-builder');
   };
@@ -518,6 +518,19 @@ async function queryCollection(rxQuery) {
   var collection = rxQuery.collection;
 
   /**
+   * Track if any events arrive while the async storage
+   * query is running. If events arrived, the query result
+   * might be stale (the storage read transaction may not
+   * include data from a concurrent write whose event was
+   * already emitted). In that case we must re-run the query
+   * to get a consistent result+counter pair.
+   */
+  var eventsDuringQueryRun = 0;
+  var sub = collection.eventBulks$.subscribe(() => {
+    eventsDuringQueryRun++;
+  });
+
+  /**
    * Optimizations shortcut.
    * If query is find-one-document-by-id,
    * then we do not have to use the slow query() method
@@ -564,9 +577,15 @@ async function queryCollection(rxQuery) {
     var queryResult = await collection.storageInstance.query(preparedQuery);
     docs = queryResult.documents;
   }
+  var counter = collection._changeEventBuffer.getCounter();
+  sub.unsubscribe();
+  if (eventsDuringQueryRun > 0) {
+    await (0, _index.promiseWait)(0);
+    return queryCollection(rxQuery);
+  }
   return {
     docs,
-    counter: collection._changeEventBuffer.getCounter()
+    counter
   };
 }
 

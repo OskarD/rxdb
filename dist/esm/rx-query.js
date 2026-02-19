@@ -1,7 +1,7 @@
 import _createClass from "@babel/runtime/helpers/createClass";
 import { BehaviorSubject, merge } from 'rxjs';
 import { mergeMap, filter, map, startWith, distinctUntilChanged, shareReplay } from 'rxjs/operators';
-import { sortObject, pluginMissing, overwriteGetterForCaching, now, PROMISE_RESOLVE_FALSE, RXJS_SHARE_REPLAY_DEFAULTS, ensureNotFalsy, areRxDocumentArraysEqual, appendToArray } from "./plugins/utils/index.js";
+import { sortObject, pluginMissing, overwriteGetterForCaching, now, PROMISE_RESOLVE_FALSE, RXJS_SHARE_REPLAY_DEFAULTS, ensureNotFalsy, areRxDocumentArraysEqual, appendToArray, promiseWait } from "./plugins/utils/index.js";
 import { newRxError, rxStorageWriteErrorToRxError } from "./rx-error.js";
 import { runPluginHooks } from "./hooks.js";
 import { calculateNewResults } from "./event-reduce.js";
@@ -257,7 +257,7 @@ export var RxQueryBase = /*#__PURE__*/function () {
 
   // we only set some methods of query-builder here
   // because the others depend on these ones
-  ;
+;
   _proto.where = function where(_queryObj) {
     throw pluginMissing('query-builder');
   };
@@ -505,6 +505,19 @@ export async function queryCollection(rxQuery) {
   var collection = rxQuery.collection;
 
   /**
+   * Track if any events arrive while the async storage
+   * query is running. If events arrived, the query result
+   * might be stale (the storage read transaction may not
+   * include data from a concurrent write whose event was
+   * already emitted). In that case we must re-run the query
+   * to get a consistent result+counter pair.
+   */
+  var eventsDuringQueryRun = 0;
+  var sub = collection.eventBulks$.subscribe(() => {
+    eventsDuringQueryRun++;
+  });
+
+  /**
    * Optimizations shortcut.
    * If query is find-one-document-by-id,
    * then we do not have to use the slow query() method
@@ -551,9 +564,15 @@ export async function queryCollection(rxQuery) {
     var queryResult = await collection.storageInstance.query(preparedQuery);
     docs = queryResult.documents;
   }
+  var counter = collection._changeEventBuffer.getCounter();
+  sub.unsubscribe();
+  if (eventsDuringQueryRun > 0) {
+    await promiseWait(0);
+    return queryCollection(rxQuery);
+  }
   return {
     docs,
-    counter: collection._changeEventBuffer.getCounter()
+    counter
   };
 }
 

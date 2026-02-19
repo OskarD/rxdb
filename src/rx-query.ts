@@ -20,7 +20,8 @@ import {
     RXJS_SHARE_REPLAY_DEFAULTS,
     ensureNotFalsy,
     areRxDocumentArraysEqual,
-    appendToArray
+    appendToArray,
+    promiseWait
 } from './plugins/utils/index.ts';
 import {
     newRxError,
@@ -677,6 +678,19 @@ export async function queryCollection<RxDocType>(
     const collection = rxQuery.collection;
 
     /**
+     * Track if any events arrive while the async storage
+     * query is running. If events arrived, the query result
+     * might be stale (the storage read transaction may not
+     * include data from a concurrent write whose event was
+     * already emitted). In that case we must re-run the query
+     * to get a consistent result+counter pair.
+     */
+    let eventsDuringQueryRun = 0;
+    const sub = collection.eventBulks$.subscribe(() => {
+        eventsDuringQueryRun++;
+    });
+
+    /**
      * Optimizations shortcut.
      * If query is find-one-document-by-id,
      * then we do not have to use the slow query() method
@@ -723,9 +737,18 @@ export async function queryCollection<RxDocType>(
         const queryResult = await collection.storageInstance.query(preparedQuery);
         docs = queryResult.documents;
     }
+
+    const counter = collection._changeEventBuffer.getCounter();
+    sub.unsubscribe();
+
+    if (eventsDuringQueryRun > 0) {
+        await promiseWait(0);
+        return queryCollection(rxQuery);
+    }
+
     return {
         docs,
-        counter: collection._changeEventBuffer.getCounter()
+        counter
     };
 
 }
